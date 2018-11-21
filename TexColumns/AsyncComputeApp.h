@@ -82,6 +82,8 @@ private:
 	void UpdateMaterialCBs(const GameTimer& gt);
 	void UpdateMainPassCB(const GameTimer& gt);
 
+	void InitComputeQueue();
+
 	void LoadTextures();
 	void LoadModels();
 	void BuildRootSignature();
@@ -129,6 +131,11 @@ private:
 
 	// Blur filter into a seperate class
 	std::unique_ptr<BlurFilter> mBlurFilter;
+
+	// Compute Queue Resources
+	ComPtr<ID3D12CommandQueue> mComputeQueue;
+	ComPtr<ID3D12CommandAllocator> mComputeAllocator;
+	ComPtr<ID3D12GraphicsCommandList> mComputeCommandList;
 
 	PassConstants mMainPassCB;
 

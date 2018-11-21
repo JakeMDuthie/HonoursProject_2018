@@ -56,7 +56,7 @@ void BlurFilter::OnResize(UINT newWidth, UINT newHeight)
 
 void BlurFilter::Execute(ID3D12GraphicsCommandList* cmdList,
 	ID3D12RootSignature* rootSig,
-	ID3D12PipelineState* horzBlurPSO,
+	ID3D12PipelineState* horiBlurPSO,
 	ID3D12PipelineState* vertBlurPSO,
 	ID3D12Resource* input,
 	int blurCount)
@@ -90,7 +90,7 @@ void BlurFilter::Execute(ID3D12GraphicsCommandList* cmdList,
 		// Horizontal Blur pass.
 		//
 
-		cmdList->SetPipelineState(horzBlurPSO);
+		cmdList->SetPipelineState(horiBlurPSO);
 
 		cmdList->SetComputeRootDescriptorTable(1, mBlur0GpuSrv);
 		cmdList->SetComputeRootDescriptorTable(2, mBlur1GpuUav);

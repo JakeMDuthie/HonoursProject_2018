@@ -38,7 +38,7 @@ public:
 	void Execute(
 		ID3D12GraphicsCommandList* cmdList,
 		ID3D12RootSignature* rootSig,
-		ID3D12PipelineState* horzBlurPSO,
+		ID3D12PipelineState* horiBlurPSO,
 		ID3D12PipelineState* vertBlurPSO,
 		ID3D12Resource* input,
 		int blurCount);
