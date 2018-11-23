@@ -112,6 +112,10 @@ void AsyncComputeApp::InitComputeQueue()
 	// to the command list we will Reset it, and it needs to be closed before
 	// calling Reset.
 	mComputeCommandList->Close();
+
+	// Set up the async fence variable here too
+	// Initialise it to be at 0 to begin with
+	ThrowIfFailed(md3dDevice->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&mAsyncFence)));
 }
  
 void AsyncComputeApp::OnResize()
@@ -156,10 +160,13 @@ void AsyncComputeApp::Update(const GameTimer& gt)
 void AsyncComputeApp::Draw(const GameTimer& gt)
 {
     auto cmdListAlloc = mCurrFrameResource->CmdListAlloc;
+	UINT blurCount = 0;
 
     // Reuse the memory associated with command recording.
     // We can only reset when the associated command lists have finished execution on the GPU.
     ThrowIfFailed(cmdListAlloc->Reset());
+
+	//ThrowIfFailed(mComputeAllocator->Reset());
 
     // A command list can be reset after it has been added to the command queue via ExecuteCommandList.
     // Reusing the command list reuses memory.
@@ -189,11 +196,53 @@ void AsyncComputeApp::Draw(const GameTimer& gt)
 	mCommandList->SetGraphicsRootConstantBufferView(2, passCB->GetGPUVirtualAddress());
 
     DrawRenderItems(mCommandList.Get(), mOpaqueRitems);
+	
+	if (ASYNC_ACTIVATED)
+	{
+		// close command list and execute
+		ThrowIfFailed(mCommandList->Close());
+
+		mCommandQueue->Wait(mAsyncFence.Get(), 0);
+
+		// Render geometry to the back buffer before compute can take place
+		ID3D12CommandList* cmdsLists[] = { mCommandList.Get() };
+		mCommandQueue->ExecuteCommandLists(_countof(cmdsLists), cmdsLists);
+
+		mCommandQueue->Signal(mAsyncFence.Get(), 1);
+	}
 
 	// Apply the blur here
-	mBlurFilter->Execute(mCommandList.Get(), mPostProcessRootSignature.Get(),
-						mPSOs["horiBlur"].Get(), mPSOs["vertBlur"].Get(), CurrentBackBuffer(), 20);
+	if (ASYNC_ACTIVATED)
+	{
+		// Wait until the rendering has completed before computing post-proc
+		mComputeQueue->Wait(mAsyncFence.Get(), 1);
 
+		//ThrowIfFailed(mComputeCommandList->Reset(mComputeAllocator.Get(), nullptr));
+
+		// We want to pass the compute command list here
+		mBlurFilter->Execute(mComputeCommandList.Get(), mPostProcessRootSignature.Get(),
+			mPSOs["horiBlur"].Get(), mPSOs["vertBlur"].Get(), CurrentBackBuffer(), blurCount);
+
+		ThrowIfFailed(mComputeCommandList->Close());
+
+		ID3D12CommandList* computeLists[] = { mComputeCommandList.Get() };
+		mComputeQueue->ExecuteCommandLists(_countof(computeLists), computeLists);
+
+		mComputeQueue->Signal(mAsyncFence.Get(), 2);
+	}
+	else
+	{
+		mBlurFilter->Execute(mCommandList.Get(), mPostProcessRootSignature.Get(),
+			mPSOs["horiBlur"].Get(), mPSOs["vertBlur"].Get(), CurrentBackBuffer(), blurCount);
+	}
+
+	if (ASYNC_ACTIVATED)
+	{
+		// Wait for the blur shader to have completed
+		mCommandQueue->Wait(mAsyncFence.Get(), 2);
+		
+		ThrowIfFailed(mCommandList->Reset(cmdListAlloc.Get(), nullptr));
+	}
     // Indicate a state transition on the resource usage.
 	mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
 		D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_DEST));
@@ -208,8 +257,10 @@ void AsyncComputeApp::Draw(const GameTimer& gt)
     ThrowIfFailed(mCommandList->Close());
 
     // Add the command list to the queue for execution.
-    ID3D12CommandList* cmdsLists[] = { mCommandList.Get() };
+	ID3D12CommandList* cmdsLists[] = { mCommandList.Get() };
     mCommandQueue->ExecuteCommandLists(_countof(cmdsLists), cmdsLists);
+
+	//HRESULT test = md3dDevice->GetDeviceRemovedReason();
 
     // Swap the back and front buffers
     ThrowIfFailed(mSwapChain->Present(0, 0));
@@ -222,6 +273,10 @@ void AsyncComputeApp::Draw(const GameTimer& gt)
     // Because we are on the GPU timeline, the new fence point won't be 
     // set until the GPU finishes processing all the commands prior to this Signal().
     mCommandQueue->Signal(mFence.Get(), mCurrentFence);
+
+	// Set fence back to normal, frame is complete
+	if (ASYNC_ACTIVATED)
+		mComputeQueue->Signal(mAsyncFence.Get(), 0);
 }
 
 void AsyncComputeApp::OnMouseDown(WPARAM btnState, int x, int y)

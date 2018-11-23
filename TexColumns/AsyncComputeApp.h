@@ -109,7 +109,11 @@ private:
 
 	UINT mCbvSrvDescriptorSize = 0;
 
+	// toggle this variable to activate/deactivate async compute for runtime
+	const bool ASYNC_ACTIVATED = true;
+
 	ComPtr<ID3D12RootSignature> mRootSignature = nullptr;
+
 	// blurring requires a seperate root signature
 	ComPtr<ID3D12RootSignature> mPostProcessRootSignature = nullptr;
 
@@ -136,6 +140,9 @@ private:
 	ComPtr<ID3D12CommandQueue> mComputeQueue;
 	ComPtr<ID3D12CommandAllocator> mComputeAllocator;
 	ComPtr<ID3D12GraphicsCommandList> mComputeCommandList;
+
+	// Fence for async process
+	ComPtr<ID3D12Fence> mAsyncFence;
 
 	PassConstants mMainPassCB;
 
