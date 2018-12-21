@@ -93,6 +93,7 @@ private:
 	void BuildShapeGeometry();
 	void BuildPSOs();
 	void BuildBlurPSOs();
+	void BuildRenderTexture();
 	void BuildFrameResources();
 	void BuildMaterials();
 	void BuildRenderItems();
@@ -130,6 +131,8 @@ private:
 	// List of all the render items.
 	std::vector<std::unique_ptr<RenderItem>> mAllRitems;
 
+	ComPtr<ID3D12Resource> mRenderTexture = nullptr;
+
 	// Render items divided by PSO.
 	std::vector<RenderItem*> mOpaqueRitems;
 
@@ -138,11 +141,22 @@ private:
 
 	// Compute Queue Resources
 	ComPtr<ID3D12CommandQueue> mComputeQueue;
-	ComPtr<ID3D12CommandAllocator> mComputeAllocator;
-	ComPtr<ID3D12GraphicsCommandList> mComputeCommandList;
+	ComPtr<ID3D12CommandAllocator> mDirectComputeListAlloc;
+	ComPtr<ID3D12GraphicsCommandList> mComputeList;
 
-	// Fence for async process
-	ComPtr<ID3D12Fence> mAsyncFence;
+	// Synchronization objects.
+	ComPtr<ID3D12Fence>	m_computeFences[gNumFrameResources];
+	ComPtr<ID3D12Fence> m_graphicsFences[gNumFrameResources];
+	ComPtr<ID3D12Fence> m_graphicsCopyFences[gNumFrameResources];
+
+	UINT64 m_computeFenceValue;
+	UINT64 m_graphicsFenceValue;
+	UINT64 m_graphicsCopyFenceValue;
+	UINT64 m_computeFenceValues[gNumFrameResources];
+	UINT64 m_graphicsFenceValues[gNumFrameResources];
+	UINT64 m_graphicsCopyFenceValues[gNumFrameResources];
+
+	UINT64 m_lastFrameResourceIndex;
 
 	PassConstants mMainPassCB;
 

@@ -118,7 +118,7 @@ public:
 	/// Loads an obj from a file using the tiny obj library.
 	/// Normals true if the obj file being loaded has normal values
 	///</summary>
-	MeshData CreateMeshFromFile(char* filename, bool normals = false);
+	MeshData CreateMeshFromFile(char* filename, bool normals = true);
 
 private:
 	void Subdivide(MeshData& meshData);

@@ -49,7 +49,7 @@ struct FrameResource
 {
 public:
     
-    FrameResource(ID3D12Device* device, UINT passCount, UINT objectCount, UINT materialCount);
+    FrameResource(ID3D12Device* device, UINT passCount, UINT objectCount, UINT materialCount, bool asyncActive);
     FrameResource(const FrameResource& rhs) = delete;
     FrameResource& operator=(const FrameResource& rhs) = delete;
     ~FrameResource();
@@ -57,6 +57,8 @@ public:
     // We cannot reset the allocator until the GPU is done processing the commands.
     // So each frame needs their own allocator.
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator> CmdListAlloc;
+	Microsoft::WRL::ComPtr<ID3D12CommandAllocator> CopyListAlloc;
+	Microsoft::WRL::ComPtr<ID3D12CommandAllocator> ComputeListAlloc;
 
     // We cannot update a cbuffer until the GPU is done processing the commands
     // that reference it.  So each frame needs their own cbuffers.

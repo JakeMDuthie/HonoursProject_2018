@@ -44,13 +44,15 @@ bool AsyncComputeApp::Initialize()
     if(!D3DApp::Initialize())
         return false;
 
+	m_lastFrameResourceIndex = mCurrFrameResourceIndex;
+
 	InitComputeQueue();
 
     // Reset the command list to prep for initialization commands.
     ThrowIfFailed(mCommandList->Reset(mDirectCmdListAlloc.Get(), nullptr));
 
-	// Reset the compute command list also
-	ThrowIfFailed(mComputeCommandList->Reset(mComputeAllocator.Get(), nullptr));
+	if(ASYNC_ACTIVATED)
+		ThrowIfFailed(mComputeList->Reset(mDirectComputeListAlloc.Get(), nullptr));
 
     // Get the increment size of a descriptor in this heap type.  This is hardware specific, 
 	// so we have to query this information.
@@ -66,14 +68,15 @@ bool AsyncComputeApp::Initialize()
 	BuildDescriptorHeaps();
     BuildShadersAndInputLayout();
 	BuildMaterials();
+	BuildRenderTexture();
 
 	// Columns
 	BuildShapeGeometry();
-    //BuildRenderItems();
+    BuildRenderItems();
 
 	// Model
-	LoadModels();
-	BuildModel();
+	//LoadModels();
+	//BuildModel();
 
     BuildFrameResources();
     BuildPSOs();
@@ -84,6 +87,14 @@ bool AsyncComputeApp::Initialize()
     ID3D12CommandList* cmdsLists[] = { mCommandList.Get() };
     mCommandQueue->ExecuteCommandLists(_countof(cmdsLists), cmdsLists);
 
+	if (ASYNC_ACTIVATED)
+	{
+		ThrowIfFailed(mComputeList->Close());
+		cmdsLists[0] = { mComputeList.Get() };
+		mComputeQueue->ExecuteCommandLists(_countof(cmdsLists), cmdsLists);
+	}
+
+
     // Wait until initialization is complete.
     FlushCommandQueue();
 
@@ -93,29 +104,45 @@ bool AsyncComputeApp::Initialize()
 void AsyncComputeApp::InitComputeQueue()
 {
 	D3D12_COMMAND_QUEUE_DESC queueDesc = {};
-	queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+	queueDesc.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
 	queueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
 	ThrowIfFailed(md3dDevice->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&mComputeQueue)));
 
-	ThrowIfFailed(md3dDevice->CreateCommandAllocator(
-		D3D12_COMMAND_LIST_TYPE_DIRECT,
-		IID_PPV_ARGS(mComputeAllocator.GetAddressOf())));
-
-	ThrowIfFailed(md3dDevice->CreateCommandList(
-		0,
-		D3D12_COMMAND_LIST_TYPE_DIRECT,
-		mComputeAllocator.Get(), // Associated command allocator
-		nullptr,                   // Initial PipelineStateObject
-		IID_PPV_ARGS(mComputeCommandList.GetAddressOf())));
-
-	// Start off in a closed state.  This is because the first time we refer 
-	// to the command list we will Reset it, and it needs to be closed before
-	// calling Reset.
-	mComputeCommandList->Close();
-
 	// Set up the async fence variable here too
-	// Initialise it to be at 0 to begin with
-	ThrowIfFailed(md3dDevice->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&mAsyncFence)));
+	// initialise fence values
+	m_computeFenceValue = 1;
+	m_graphicsFenceValue = 1;
+	m_graphicsCopyFenceValue = 1;
+
+	// create fences
+	for (int i = 0; i < gNumFrameResources; i++)
+	{
+		m_computeFenceValues[i] = 0;
+		m_graphicsFenceValues[i] = 0;
+		m_graphicsCopyFenceValues[i] = 0;
+
+		ThrowIfFailed(md3dDevice->CreateFence(m_graphicsFenceValue, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_graphicsFences[i])));
+		ThrowIfFailed(md3dDevice->CreateFence(m_computeFenceValue, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_computeFences[i])));
+		ThrowIfFailed(md3dDevice->CreateFence(m_graphicsCopyFenceValue, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_graphicsCopyFences[i])));
+	}
+
+	if (ASYNC_ACTIVATED)
+	{
+		ThrowIfFailed(md3dDevice->CreateCommandAllocator(
+			D3D12_COMMAND_LIST_TYPE_COMPUTE,
+			IID_PPV_ARGS(mDirectComputeListAlloc.GetAddressOf())));
+
+		// initialise compute list
+		ThrowIfFailed(md3dDevice->CreateCommandList(
+			0,
+			D3D12_COMMAND_LIST_TYPE_COMPUTE,
+			mDirectComputeListAlloc.Get(), // Associated command allocator
+			nullptr,                   // Initial PipelineStateObject
+			IID_PPV_ARGS(mComputeList.GetAddressOf())));
+
+		// close command list
+		ThrowIfFailed(mComputeList->Close());
+	}
 }
  
 void AsyncComputeApp::OnResize()
@@ -130,6 +157,8 @@ void AsyncComputeApp::OnResize()
 	{
 		mBlurFilter->OnResize(mClientWidth, mClientHeight);
 	}
+
+	BuildRenderTexture();
 }
 
 void AsyncComputeApp::Update(const GameTimer& gt)
@@ -160,13 +189,24 @@ void AsyncComputeApp::Update(const GameTimer& gt)
 void AsyncComputeApp::Draw(const GameTimer& gt)
 {
     auto cmdListAlloc = mCurrFrameResource->CmdListAlloc;
+	auto computeListAlloc = mCurrFrameResource->ComputeListAlloc;
+	auto copyListAlloc = mCurrFrameResource->CopyListAlloc;
+
 	UINT blurCount = 0;
 
     // Reuse the memory associated with command recording.
     // We can only reset when the associated command lists have finished execution on the GPU.
     ThrowIfFailed(cmdListAlloc->Reset());
 
-	//ThrowIfFailed(mComputeAllocator->Reset());
+	//
+	// RENDER
+	//
+	if (ASYNC_ACTIVATED)
+	{
+		// wait for copy fence from last frame to complete
+		mCommandQueue->Wait(m_graphicsCopyFences[m_lastFrameResourceIndex].Get(), 
+							m_graphicsCopyFenceValues[m_lastFrameResourceIndex]);
+	}
 
     // A command list can be reset after it has been added to the command queue via ExecuteCommandList.
     // Reusing the command list reuses memory.
@@ -196,56 +236,107 @@ void AsyncComputeApp::Draw(const GameTimer& gt)
 	mCommandList->SetGraphicsRootConstantBufferView(2, passCB->GetGPUVirtualAddress());
 
     DrawRenderItems(mCommandList.Get(), mOpaqueRitems);
-	
-	if (ASYNC_ACTIVATED)
+
+	// Test seperate render texture here
+	//
+	//
+	mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
+		D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE));
+
+	mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(mRenderTexture.Get(),
+		D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST));
+
+	// Copy the back buffer to a render texture
+	mCommandList->CopyResource(mRenderTexture.Get(), CurrentBackBuffer());
+
+	// close list before executing
+	ThrowIfFailed(mCommandList->Close());
+
+	// Add the command list to the queue for execution.
+	ID3D12CommandList* cmdsLists[] = { mCommandList.Get() };
+
+	if (ASYNC_ACTIVATED) 
 	{
-		// close command list and execute
-		ThrowIfFailed(mCommandList->Close());
-
-		mCommandQueue->Wait(mAsyncFence.Get(), 0);
-
-		// Render geometry to the back buffer before compute can take place
-		ID3D12CommandList* cmdsLists[] = { mCommandList.Get() };
 		mCommandQueue->ExecuteCommandLists(_countof(cmdsLists), cmdsLists);
-
-		mCommandQueue->Signal(mAsyncFence.Get(), 1);
-	}
-
-	// Apply the blur here
-	if (ASYNC_ACTIVATED)
-	{
-		// Wait until the rendering has completed before computing post-proc
-		mComputeQueue->Wait(mAsyncFence.Get(), 1);
-
-		//ThrowIfFailed(mComputeCommandList->Reset(mComputeAllocator.Get(), nullptr));
-
-		// We want to pass the compute command list here
-		mBlurFilter->Execute(mComputeCommandList.Get(), mPostProcessRootSignature.Get(),
-			mPSOs["horiBlur"].Get(), mPSOs["vertBlur"].Get(), CurrentBackBuffer(), blurCount);
-
-		ThrowIfFailed(mComputeCommandList->Close());
-
-		ID3D12CommandList* computeLists[] = { mComputeCommandList.Get() };
-		mComputeQueue->ExecuteCommandLists(_countof(computeLists), computeLists);
-
-		mComputeQueue->Signal(mAsyncFence.Get(), 2);
+		m_graphicsFenceValues[mCurrFrameResourceIndex] = m_graphicsFenceValue;
+		mCommandQueue->Signal(m_graphicsFences[mCurrFrameResourceIndex].Get(), 
+							m_graphicsFenceValue);
 	}
 	else
 	{
-		mBlurFilter->Execute(mCommandList.Get(), mPostProcessRootSignature.Get(),
-			mPSOs["horiBlur"].Get(), mPSOs["vertBlur"].Get(), CurrentBackBuffer(), blurCount);
+		mCommandQueue->ExecuteCommandLists(_countof(cmdsLists), cmdsLists);
 	}
+
+	// update graphics fence
+	m_graphicsFenceValue++;
+
+	//
+	// COMPUTE
+	//
+	ThrowIfFailed(computeListAlloc->Reset());
 
 	if (ASYNC_ACTIVATED)
 	{
-		// Wait for the blur shader to have completed
-		mCommandQueue->Wait(mAsyncFence.Get(), 2);
-		
-		ThrowIfFailed(mCommandList->Reset(cmdListAlloc.Get(), nullptr));
+		// wait for render
+		mComputeQueue->Wait(m_graphicsFences[m_lastFrameResourceIndex].Get(),
+							m_graphicsFenceValues[m_lastFrameResourceIndex]);
 	}
-    // Indicate a state transition on the resource usage.
+
+	if (ASYNC_ACTIVATED) {
+		// reset the list in order to compute
+		ThrowIfFailed(mComputeList->Reset(computeListAlloc.Get(), nullptr));
+
+		// if async compute is not activated, apply the blur filter after the render process
+		mBlurFilter->Execute(mComputeList.Get(), mPostProcessRootSignature.Get(),
+			mPSOs["horiBlur"].Get(), mPSOs["vertBlur"].Get(), CurrentBackBuffer(), blurCount);
+
+		// close list before execution
+		ThrowIfFailed(mComputeList->Close());
+
+		cmdsLists[0] = { mComputeList.Get() };
+
+		m_computeFenceValues[mCurrFrameResourceIndex] = m_computeFenceValue;
+		mComputeQueue->Signal(m_computeFences[mCurrFrameResourceIndex].Get(), 
+								m_computeFenceValue);
+		mComputeQueue->ExecuteCommandLists(_countof(cmdsLists), cmdsLists);
+	}
+	else
+	{
+		// reset the list in order to compute
+		ThrowIfFailed(mCommandList->Reset(computeListAlloc.Get(), nullptr));
+
+		// if async compute is not activated, apply the blur filter after the render process
+		mBlurFilter->Execute(mCommandList.Get(), mPostProcessRootSignature.Get(),
+			mPSOs["horiBlur"].Get(), mPSOs["vertBlur"].Get(), mRenderTexture.Get(), blurCount);
+
+		// close list before execution
+		ThrowIfFailed(mCommandList->Close());
+
+		cmdsLists[0] = { mCommandList.Get() };
+
+		mCommandQueue->ExecuteCommandLists(_countof(cmdsLists), cmdsLists);
+	}
+	// update compute fence
+	m_computeFenceValue++;
+
+	//
+	// COPY
+	//
+	ThrowIfFailed(copyListAlloc->Reset());
+
+	if (ASYNC_ACTIVATED)
+	{
+		// wait for render
+		mCommandQueue->Wait(m_computeFences[m_lastFrameResourceIndex].Get(),
+							m_computeFenceValues[m_lastFrameResourceIndex]);
+	}
+
+	// reset copy allocator
+	ThrowIfFailed(mCommandList->Reset(copyListAlloc.Get(), nullptr));
+
+	// Indicate a state transition on the resource usage.
 	mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
-		D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_DEST));
+		D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_DEST));
 
 	mCommandList->CopyResource(CurrentBackBuffer(), mBlurFilter->Output());
 
@@ -253,12 +344,23 @@ void AsyncComputeApp::Draw(const GameTimer& gt)
 	mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
 		D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT));
 
-    // Done recording commands.
-    ThrowIfFailed(mCommandList->Close());
+	// Done recording commands.
+	ThrowIfFailed(mCommandList->Close());
 
-    // Add the command list to the queue for execution.
-	ID3D12CommandList* cmdsLists[] = { mCommandList.Get() };
-    mCommandQueue->ExecuteCommandLists(_countof(cmdsLists), cmdsLists);
+	// Add the command list to the queue for execution.
+	cmdsLists[0] = { mCommandList.Get() };
+
+	if (ASYNC_ACTIVATED) {
+		m_graphicsCopyFenceValues[mCurrFrameResourceIndex] = m_graphicsCopyFenceValue;
+		mCommandQueue->Signal(m_graphicsCopyFences[mCurrFrameResourceIndex].Get(), m_graphicsCopyFenceValue);
+		mCommandQueue->ExecuteCommandLists(_countof(cmdsLists), cmdsLists);
+	}
+	else
+	{
+		mCommandQueue->ExecuteCommandLists(_countof(cmdsLists), cmdsLists);
+	}
+	// update copy fence value
+	m_graphicsCopyFenceValue++;
 
 	//HRESULT test = md3dDevice->GetDeviceRemovedReason();
 
@@ -274,9 +376,7 @@ void AsyncComputeApp::Draw(const GameTimer& gt)
     // set until the GPU finishes processing all the commands prior to this Signal().
     mCommandQueue->Signal(mFence.Get(), mCurrentFence);
 
-	// Set fence back to normal, frame is complete
-	if (ASYNC_ACTIVATED)
-		mComputeQueue->Signal(mAsyncFence.Get(), 0);
+	m_lastFrameResourceIndex = mCurrFrameResourceIndex;
 }
 
 void AsyncComputeApp::OnMouseDown(WPARAM btnState, int x, int y)
@@ -474,7 +574,7 @@ void AsyncComputeApp::LoadTextures()
 void AsyncComputeApp::LoadModels()
 {
 	GeometryGenerator geoGen;
-	GeometryGenerator::MeshData chalet = geoGen.CreateMeshFromFile("../Models/newChaletZPos.obj", true);
+	GeometryGenerator::MeshData chalet = geoGen.CreateMeshFromFile("../Models/newChaletZPos.obj");
 
 	SubmeshGeometry chaletSubmesh;
 
@@ -890,8 +990,9 @@ void AsyncComputeApp::BuildFrameResources()
 {
     for(int i = 0; i < gNumFrameResources; ++i)
     {
+		// create frame resources different based on async on/off
         mFrameResources.push_back(std::make_unique<FrameResource>(md3dDevice.Get(),
-            1, (UINT)mAllRitems.size(), (UINT)mMaterials.size()));
+            1, (UINT)mAllRitems.size(), (UINT)mMaterials.size(), ASYNC_ACTIVATED));
     }
 }
 
@@ -933,6 +1034,31 @@ void AsyncComputeApp::BuildMaterials()
 	mMaterials["stone0"] = std::move(stone0);
 	mMaterials["tile0"] = std::move(tile0);
 	mMaterials["chalet0"] = std::move(chalet0);
+}
+
+void AsyncComputeApp::BuildRenderTexture()
+{
+	D3D12_RESOURCE_DESC texDesc;
+	ZeroMemory(&texDesc, sizeof(D3D12_RESOURCE_DESC));
+	texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+	texDesc.Alignment = 0;
+	texDesc.Width = mClientWidth;
+	texDesc.Height = mClientHeight;
+	texDesc.DepthOrArraySize = 1;
+	texDesc.MipLevels = 1;
+	texDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	texDesc.SampleDesc.Count = 1;
+	texDesc.SampleDesc.Quality = 0;
+	texDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+	texDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+
+	ThrowIfFailed(md3dDevice->CreateCommittedResource(
+		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
+		D3D12_HEAP_FLAG_NONE,
+		&texDesc,
+		D3D12_RESOURCE_STATE_COMMON,
+		nullptr,
+		IID_PPV_ARGS(&mRenderTexture)));
 }
 
 void AsyncComputeApp::BuildRenderItems()
